@@ -1,1 +1,3 @@
-rootProject.name = "mcp-cli-kotlin"
+rootProject.name = "learnmcp"
+
+include(":client", ":server")
