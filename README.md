@@ -1,67 +1,189 @@
-# mcp-cli-kotlin
+# learnmcp — MCP on Kotlin/JVM
 
-Минимальный CLI-клиент для **Model Context Protocol (MCP)** на Kotlin/JVM.
-Подключается к готовому MCP-серверу по STDIO, делает handshake и печатает
-список доступных инструментов (`tools/list`).
+Multi-module Gradle project. Two independent runnables:
 
-## Что делает
+| Module     | What it is                                                                 | Run                       |
+|------------|----------------------------------------------------------------------------|---------------------------|
+| `:server`  | Own MCP server around the **Home Assistant** REST API.                     | `./gradlew :server:run`   |
+| `:client`  | Minimal MCP **client** (handshake + `tools/list` + `tools/call` over stdio). | `./gradlew :client:run`   |
 
-1. Поднимает MCP-сервер как сабпроцесс (STDIO-транспорт).
-2. Выполняет `initialize` (handshake) и `tools/list`.
-3. Печатает имя сервера/версию и список инструментов: имя, описание,
-   краткую схему входных параметров (`*` = обязательный).
-4. Корректно закрывает соединение и завершает процесс.
+The wrapper (`./gradlew`) lives at the repo root; each module builds and runs on its own.
 
-## Предусловия
+---
 
-- **JDK 17+** (проверено на JDK 21).
-- **Node.js / npx** — нужен только для дефолтного stdio-сервера
-  `@modelcontextprotocol/server-everything` (скачивается через `npx -y`).
-- Gradle ставить не нужно — используется wrapper (`./gradlew`).
+## Home Assistant MCP server (`:server`)
 
-## Запуск
+A self-written MCP server (no `mcpany`/`openmcp` wrapper) that proxies the Home
+Assistant REST API and exposes smart-home tools to an agent.
 
-Сервер по умолчанию (эталонный `server-everything`):
+### Tools
+
+| Tool            | Required params                     | Optional   | Returns                                            |
+|-----------------|-------------------------------------|------------|----------------------------------------------------|
+| `list_entities` | —                                   | `domain`   | entity_id + friendly_name + state (filtered)       |
+| `get_state`     | `entity_id`                         | —          | state + attributes of one entity                   |
+| `call_service`  | `domain`, `service`, `entity_id`    | `data`     | execution status + new state (when HA reports it)  |
+| `get_sensor`    | `entity_id`                         | —          | numeric value + unit                               |
+
+Each tool has a human-readable `description` and a strict `inputSchema`
+(required params enforced; the server returns a readable error instead of a
+stack trace on bad input, unreachable HA, 401, or unknown entity).
+
+### Endpoints proxied
+
+- `GET  /api/states`                    — all entities
+- `GET  /api/states/<entity_id>`        — one entity
+- `POST /api/services/<domain>/<service>` — call a service (body `{"entity_id": "..."}` plus optional `data`)
+- `GET  /api/`                          — auth/health probe
+
+### Prerequisites
+
+- **JDK 17+** (tested on JDK 21). Gradle not needed — use the wrapper.
+- A reachable **Home Assistant** instance.
+- A **Long-Lived Access Token**: in HA, click your profile (bottom-left) →
+  **Security** tab → **Long-Lived Access Tokens** → **Create Token**. Copy it once.
+
+### Configuration (secrets via env only)
+
+Either drop the values in a `.env` file (auto-loaded at startup), or export them in
+your shell. A real process env var always wins over the `.env` file.
 
 ```bash
-./gradlew run
+cp server/.env.example server/.env   # then edit — picked up automatically
+# …or export instead:
+export HA_BASE_URL="http://homeassistant.local:8123"   # with or without trailing /api
+export HA_TOKEN="eyJhbGciOiJ..."                       # the Long-Lived token
 ```
 
-Свой сервер — командой через `--args` (команда + её аргументы):
+The server reads `.env` from the working directory, falling back to `server/.env`.
+No secret is ever read from code or args — only `HA_BASE_URL` and `HA_TOKEN`.
+
+### Run locally (stdio)
 
 ```bash
-./gradlew run --args="npx -y @modelcontextprotocol/server-everything"
-# любой другой stdio-сервер, например собственный jar:
-./gradlew run --args="java -jar /path/to/your-mcp-server.jar"
+# Gradle (reads env from your shell):
+HA_BASE_URL=... HA_TOKEN=... ./gradlew :server:run --args="--stdio"
+
+# Or build a fat jar and run it directly:
+./gradlew :server:shadowJar
+java -jar server/build/libs/server-all.jar --stdio
 ```
 
-На Windows запускать так же (`gradlew.bat run` или `./gradlew run` в Git Bash);
-клиент сам оборачивает команду в `cmd /c`, чтобы найти `npx.cmd`.
+`--stdio` is the default (so bare `:server:run` works too). Service logs go to
+**stderr**; **stdout** carries only the MCP protocol.
 
-## Пример вывода
+### Connect it to a code assistant (stdio MCP)
 
+Point the assistant's MCP config at the jar. Example (`mcpServers` shape used by
+Claude Code / most clients):
+
+```json
+{
+  "mcpServers": {
+    "home-assistant": {
+      "command": "java",
+      "args": ["-jar", "/abs/path/to/server-all.jar", "--stdio"],
+      "env": {
+        "HA_BASE_URL": "http://homeassistant.local:8123",
+        "HA_TOKEN": "eyJhbGciOiJ..."
+      }
+    }
+  }
+}
 ```
-Connected to: mcp-servers/everything 2.0.0
-Available tools (13):
-  1. echo — Echoes back the input string
-     params: message: string*
-  2. get-sum — Returns the sum of two numbers
-     params: a: number*, b: number*
-  ...
+
+### Demo scenario (agent uses the result)
+
+1. Agent calls `list_entities` with `{"domain": "light"}` → finds `light.kitchen [off]`.
+2. Agent calls `call_service` `{"domain":"light","service":"turn_on","entity_id":"light.kitchen"}`
+   → server returns `Called light/turn_on on light.kitchen — OK. New state: on`.
+3. Agent calls `get_state` `{"entity_id":"light.kitchen"}` → reads back `state: on` and brightness attributes.
+
+### Test with MCP Inspector (before deploy)
+
+```bash
+./gradlew :server:shadowJar
+# stdio mode — Inspector launches the jar as a subprocess:
+npx @modelcontextprotocol/inspector \
+  -e HA_BASE_URL=http://homeassistant.local:8123 \
+  -e HA_TOKEN=eyJhbGciOiJ... \
+  java -jar server/build/libs/server-all.jar --stdio
 ```
 
-Служебные логи (старт сервера, SLF4J, ошибки) идут в **stderr**, поэтому
-stdout содержит только результат.
+Open the Inspector URL, hit **List Tools**, then call `list_entities` /
+`call_service` and watch the JSON results.
 
-## Стек
+### Deploy on a VPS (HTTP/SSE transport)
 
-- Kotlin/JVM, Gradle (Kotlin DSL).
-- Официальный MCP Kotlin SDK: `io.modelcontextprotocol:kotlin-sdk`.
-- `kotlinx.coroutines` (`runBlocking` в `main`).
-- Транспорт: `StdioClientTransport`.
+The same server exposes an SSE transport for remote use:
 
-## Демо-видео
+```bash
+java -jar server-all.jar --sse 3001        # endpoint: http://0.0.0.0:3001/sse
+```
 
-Запустите `./gradlew run` и покажите строку `Connected to: …` вместе со
-списком `Available tools (N)` — это доказывает, что соединение установлено,
-протокол ответил и приложение чисто завершилось.
+On the VPS: copy `server-all.jar`, set `HA_BASE_URL`/`HA_TOKEN` in the unit
+environment, run under systemd, and put a TLS reverse proxy (Caddy/Nginx) in
+front of `:3001`. Point your agent's SSE MCP config at `https://<vps>/sse`.
+
+> Note: the bundled SSE setup allows any origin for convenience — restrict CORS
+> and require TLS before exposing it publicly.
+
+### What to show in the demo video
+
+- Start the server and connect from MCP Inspector (or your assistant); show the
+  4 tools listed with their parameter schemas.
+- Run the live scenario: `list_entities` → pick a light → `call_service` turn_on
+  → `get_state` shows `on`. That proves the agent calls a tool **and uses the result**.
+- Optionally pull the token / show the server refusing to start without
+  `HA_BASE_URL`/`HA_TOKEN`, to demonstrate secrets-from-env-only.
+
+---
+
+## MCP client (`:client`)
+
+Minimal stdio MCP client: spawns a server, runs `initialize` + `tools/list`,
+prints the tools, then **calls a tool and uses the result**. It picks
+`list_entities` against this project's server (and chains the first entity into a
+`get_state` call), or `echo` against the reference server, or any no-required-param
+tool otherwise. Defaults to `@modelcontextprotocol/server-everything` (needs
+Node/npx), or point it at any stdio server — including this project's own:
+
+```bash
+# Build the server jar first:
+./gradlew :server:shadowJar
+
+# `:client:run` runs with cwd = the client/ module dir, so step up one with `..`
+# to reach the server jar at the repo root.
+./gradlew :client:run --args="java -jar ../server/build/libs/server-all.jar --stdio"
+```
+
+### Agent mode (DeepSeek LLM drives the tools)
+
+With a DeepSeek key present, `:client` becomes an interactive **LLM agent**: it
+lists the server's tools, hands them to DeepSeek as function-calling tools, then
+loops — the model picks a tool, the client calls it over MCP, the result is fed
+back, and the model uses it to act and answer.
+
+```bash
+cp client/.env.example client/.env   # then set DEEPSEEK_API_KEY (model defaults to deepseek-v4-pro)
+./gradlew :server:shadowJar
+./gradlew :client:run --args="java -jar ../server/build/libs/server-all.jar --stdio"
+> turn on the kitchen light
+# · list_entities {"domain":"light"}  -> finds light.kitchen [off]
+# · call_service {"domain":"light","service":"turn_on","entity_id":"light.kitchen"}
+# · get_state {"entity_id":"light.kitchen"}
+# "Kitchen light is now on."
+```
+
+Switching a light on/off/toggle is the existing `call_service` tool
+(`service` = `turn_on` | `turn_off` | `toggle`) — no extra tool needed. Without
+`DEEPSEEK_API_KEY`, `:client` runs the deterministic demo instead.
+
+## Stack
+
+- Kotlin/JVM, Gradle (Kotlin DSL, multi-module), coroutines.
+- Official MCP Kotlin SDK `io.modelcontextprotocol:kotlin-sdk:0.13.0`.
+- Ktor client (CIO) + kotlinx.serialization for the Home Assistant API.
+- `dotenv-kotlin` for local `.env` secrets (process env takes precedence).
+- Transports: `StdioServerTransport` (default) and Ktor SSE (`mcp { … }` plugin).
+- DeepSeek API (`deepseek-v4-pro`, OpenAI-compatible function calling) via Ktor client for the agent loop.
