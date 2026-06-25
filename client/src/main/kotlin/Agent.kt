@@ -14,8 +14,8 @@ private val SYSTEM_PROMPT = """
 """.trimIndent()
 
 /** Flatten a tool result's text blocks into one string (mirrors Main's helper). */
-private fun CallToolResult?.textContent(): String =
-    this?.content?.filterIsInstance<TextContent>()?.mapNotNull { it.text }?.joinToString("\n").orEmpty()
+private fun CallToolResult.textContent(): String =
+    content.filterIsInstance<TextContent>().mapNotNull { it.text }.joinToString("\n")
 
 /**
  * Interactive agent REPL: read a goal from stdin, let DeepSeek drive the MCP tools via
@@ -25,7 +25,7 @@ private fun CallToolResult?.textContent(): String =
 suspend fun runAgentRepl(mcpClient: Client, tools: List<Tool>, deepseek: DeepSeekClient) {
     val toolDefs = toDeepSeekTools(tools)
     val history = mutableListOf(ChatMessage(role = "system", content = SYSTEM_PROMPT))
-    val stdin = System.`in`.bufferedReader()
+    val stdin = System.`in`.bufferedReader(Charsets.UTF_8)
 
     println("\nAgent ready. Type a goal (e.g. \"turn on the kitchen light\"). 'exit' to quit.")
     while (true) {
@@ -77,5 +77,5 @@ private suspend fun runTurn(
             )
         }
     }
-    println("(stopped: reached $MAX_TOOL_ITERATIONS tool iterations without a final answer)")
+    System.err.println("(stopped: reached $MAX_TOOL_ITERATIONS tool iterations without a final answer)")
 }
