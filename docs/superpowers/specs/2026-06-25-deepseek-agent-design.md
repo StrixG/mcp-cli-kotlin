@@ -51,7 +51,9 @@ Three source files in `:client`:
     1:1 into `function.parameters`.
   - `runRepl(mcpClient, tools, deepseek)`:
     1. Seed message history with a short system prompt (you control a smart
-       home via these tools; call tools to answer).
+       home via these tools; call tools to answer). Note light switching: use
+       `call_service` with `domain="light"` and `service` of `turn_on`,
+       `turn_off`, or `toggle` for the target `entity_id`.
     2. Read a line from stdin (`> ` prompt). `exit`/`quit`/EOF ends.
     3. Append user message; run the **tool-calling loop**:
        - Call `deepseek.chat(history, tools)`.
@@ -118,7 +120,14 @@ stdin goal
 > turn on the kitchen light
 # agent: list_entities -> finds light.kitchen[off] -> call_service turn_on
 #        -> get_state -> "Kitchen light is now on."
+> now turn it off
+# agent: call_service turn_off light.kitchen -> get_state -> "off."
+> toggle it
+# agent: call_service toggle light.kitchen -> "back on."
 ```
+
+Switching a light on/off/toggle needs no new tool — it is `call_service`
+(`domain=light`, `service=turn_on|turn_off|toggle`).
 
 ## Out of scope (YAGNI)
 
