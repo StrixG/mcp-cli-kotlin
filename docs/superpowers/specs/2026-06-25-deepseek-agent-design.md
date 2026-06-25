@@ -19,9 +19,10 @@ reasoning agent rather than hardcoded tool selection.
 - **Interaction:** interactive REPL (multi-turn chat on stdin).
 - **Target server:** default to this repo's Home Assistant server jar; still
   overridable via `--args` exactly like the current client.
-- **LLM:** DeepSeek, model `deepseek-chat` (V3). OpenAI-compatible API,
-  supports tool/function calling. NOT `deepseek-reasoner` (R1) — it does not
-  reliably emit tool calls.
+- **LLM:** DeepSeek, model `deepseek-v4-pro`. OpenAI-compatible API, supports
+  function calling in all thinking modes. (Legacy aliases `deepseek-chat` /
+  `deepseek-reasoner` retire 2026-07-24, so use the V4 name.) Model overridable
+  via `DEEPSEEK_MODEL`, default `deepseek-v4-pro`.
 - **Secrets:** `DEEPSEEK_API_KEY` from process env or `client/.env`
   (`dotenv-kotlin`, process env wins), matching the `:server` pattern. Never
   read from code or CLI args.
@@ -40,6 +41,9 @@ Three source files in `:client`:
     `ToolCall` (id, type, function{name, arguments-as-JSON-string}),
     `ChatResponse` (choices[0].message).
   - One public `suspend fun chat(messages, tools): ChatMessage`.
+  - V4 Pro is a thinking model: replies may carry `reasoning_content`. Ignore
+    it (only `content` + `tool_calls` drive the loop); configure the JSON parser
+    with `ignoreUnknownKeys = true` so extra fields don't break deserialization.
 
 - **`Agent.kt`** — the agent loop + bridge + REPL.
   - `toDeepSeekTools(tools: List<Tool>): List<ToolDef>` — map each MCP tool to a
