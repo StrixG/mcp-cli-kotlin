@@ -153,13 +153,13 @@ private suspend fun runDeterministicDemo(client: Client, tools: List<Tool>) {
     val result = client.callTool(name = name, arguments = arguments)
     val out = result.text()
     println("Result${if (result.isError == true) " (error)" else ""}:")
-    println(out.ifBlank { "(empty)" }.prependIndent("  "))
+    renderMarkdown(out.ifBlank { "(empty)" })
 
     val firstEntity = Regex("""^- (\S+)""", RegexOption.MULTILINE).find(out)?.groupValues?.get(1)
     if (name == "list_entities" && firstEntity != null) {
         println("\nUsing result -> get_state(entity_id=$firstEntity):")
         val state = client.callTool(name = "get_state", arguments = mapOf("entity_id" to firstEntity))
-        println(state.text().ifBlank { "(empty)" }.prependIndent("  "))
+        renderMarkdown(state.text().ifBlank { "(empty)" })
     }
 }
 

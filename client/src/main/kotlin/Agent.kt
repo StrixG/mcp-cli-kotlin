@@ -11,6 +11,12 @@ private val SYSTEM_PROMPT = """
     them with list_entities first. To switch a light, call call_service with
     domain="light" and service "turn_on", "turn_off", or "toggle" for the target
     entity_id. After acting, confirm the outcome to the user in one short sentence.
+
+    Judging whether a change took effect: compare the entity's attributes (brightness,
+    color_temp, etc.) and `last_updated`, NOT `last_changed`. `last_changed` only moves
+    when the on/off state flips; adjusting brightness or color on an already-on light
+    leaves `last_changed` frozen while `last_updated` advances. A frozen `last_changed`
+    does not mean the device is unresponsive.
 """.trimIndent()
 
 /** Flatten a tool result's text blocks into one string (mirrors Main's helper). */
@@ -58,7 +64,7 @@ private suspend fun runTurn(
 
         val calls = reply.toolCalls
         if (calls.isNullOrEmpty()) {
-            println(reply.content?.trim().orEmpty().ifEmpty { "(no answer)" })
+            renderMarkdown(reply.content?.trim().orEmpty().ifEmpty { "(no answer)" })
             return
         }
 

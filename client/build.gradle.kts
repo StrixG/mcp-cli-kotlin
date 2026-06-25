@@ -26,6 +26,10 @@ dependencies {
     // .env loader for the DeepSeek API key (real process env still takes precedence).
     implementation("io.github.cdimascio:dotenv-kotlin:6.5.1")
 
+    // Terminal markdown rendering: Markdown widget -> ANSI, auto-downgrades to
+    // plain text when stdout isn't a TTY. Pulls Mordant core transitively.
+    implementation("com.github.ajalt.mordant:mordant-markdown:3.0.2")
+
     // Unit tests: kotlin-test on the JUnit5 platform, coroutine test scope.
     testImplementation(kotlin("test"))
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")

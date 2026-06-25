@@ -55,7 +55,8 @@ export HA_BASE_URL="http://homeassistant.local:8123"   # with or without trailin
 export HA_TOKEN="eyJhbGciOiJ..."                       # the Long-Lived token
 ```
 
-The server reads `.env` from the working directory, falling back to `server/.env`.
+The server loads its own `server/.env` (located via the running jar), falling back to
+the working directory. A real process env var always wins over either file.
 No secret is ever read from code or args — only `HA_BASE_URL` and `HA_TOKEN`.
 
 ### Run locally (stdio)
@@ -179,6 +180,13 @@ Switching a light on/off/toggle is the existing `call_service` tool
 (`service` = `turn_on` | `turn_off` | `toggle`) — no extra tool needed. Without
 `DEEPSEEK_API_KEY`, `:client` runs the deterministic demo instead.
 
+The agent's answers (and tool results in the demo) are rendered as **terminal
+markdown** via Mordant: headings, bold, lists, and code show as ANSI on an
+interactive TTY, and auto-downgrade to clean plain text when stdout is piped or
+redirected (markers stripped, no escape codes). Rendering goes through a single
+`renderMarkdown` seam that falls back to a plain print if the widget throws, so
+an answer is never silently dropped.
+
 ## Stack
 
 - Kotlin/JVM, Gradle (Kotlin DSL, multi-module), coroutines.
@@ -187,3 +195,4 @@ Switching a light on/off/toggle is the existing `call_service` tool
 - `dotenv-kotlin` for local `.env` secrets (process env takes precedence).
 - Transports: `StdioServerTransport` (default) and Ktor SSE (`mcp { … }` plugin).
 - DeepSeek API (`deepseek-v4-pro`, OpenAI-compatible function calling) via Ktor client for the agent loop.
+- Mordant (`mordant-markdown`) for terminal markdown rendering (ANSI on a TTY, plain text when piped).
