@@ -36,3 +36,10 @@ local.properties
 
 # Logs
 *.log
+
+# SQLite measurement store (background collector)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+**/data/

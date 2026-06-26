@@ -82,15 +82,46 @@ fun main(args: Array<String>) {
     }
 
     val client = HomeAssistantClient(baseUrl, token)
-    // Ensure the HTTP client is released on shutdown (Ctrl-C / host stop).
-    Runtime.getRuntime().addShutdownHook(Thread { client.close() })
+
+    // --- Day 18: persistent storage + background collector --------------------
+    // DB path is configurable; default keeps it under the server module so it is easy
+    // to find. Parent dir is created so a fresh checkout works without manual mkdir.
+    val dbPath = dotenv["DB_PATH"]?.trim()?.takeIf { it.isNotEmpty() }
+        ?: java.io.File(envDir ?: ".", "data/measurements.db").path
+    java.io.File(dbPath).absoluteFile.parentFile?.mkdirs()
+    val storage = Storage("jdbc:sqlite:$dbPath")
+
+    // Collection settings: persisted config (if any) wins over env, so changes made via
+    // configure_collection survive restarts; otherwise seed from env on first run.
+    val envInterval = parseDurationSeconds(dotenv["COLLECT_INTERVAL"]?.trim()) ?: 60L
+    val envEntities = (dotenv["TRACKED_ENTITIES"]?.trim().orEmpty())
+        .split(",").map { it.trim() }.filter { it.isNotEmpty() }
+    val stored = storage.loadConfig()
+    val config = CollectionConfig(
+        entities = stored?.entities ?: envEntities,
+        intervalSeconds = stored?.intervalSeconds ?: envInterval,
+    )
+    if (stored == null) storage.saveConfig(config.snapshot())
+
+    val retentionDays = dotenv["RETENTION_DAYS"]?.trim()?.toLongOrNull()
+    val collector = Collector(client, storage, config, retentionDays)
+    collector.start()
+
+    // Graceful shutdown: stop the scheduler, close the DB, release the HTTP client.
+    Runtime.getRuntime().addShutdownHook(
+        Thread {
+            collector.stop()
+            storage.close()
+            client.close()
+        },
+    )
 
     val command = args.firstOrNull() ?: "--stdio"
     val port = args.getOrNull(1)?.toIntOrNull() ?: 3001
 
     when (command) {
-        "--stdio" -> runStdio(client)
-        "--sse", "--http" -> runSse(client, port)
+        "--stdio" -> runStdio(client, storage, config)
+        "--sse", "--http" -> runSse(client, storage, config, port)
         else -> {
             log("Unknown command: $command. Use --stdio (default) or --sse [port].")
             exitProcess(1)
@@ -99,9 +130,9 @@ fun main(args: Array<String>) {
 }
 
 /** Standard I/O transport: communicate over stdin/stdout with the parent process. */
-private fun runStdio(client: HomeAssistantClient) {
+private fun runStdio(client: HomeAssistantClient, storage: Storage, config: CollectionConfig) {
     log("Home Assistant MCP server starting on stdio…")
-    val server = configureServer(client)
+    val server = configureServer(client, storage, config)
     val transport = StdioServerTransport(
         System.`in`.asSource().buffered(),
         protocolOut.asSink().buffered(),
@@ -122,9 +153,9 @@ private fun runStdio(client: HomeAssistantClient) {
 }
 
 /** HTTP + SSE transport via the SDK's Ktor plugin. Endpoint: http://host:port/sse */
-private fun runSse(client: HomeAssistantClient, port: Int) {
+private fun runSse(client: HomeAssistantClient, storage: Storage, config: CollectionConfig, port: Int) {
     log("Home Assistant MCP server starting on http://0.0.0.0:$port/sse")
     embeddedServer(CIO, host = "0.0.0.0", port = port) {
-        mcp { configureServer(client) }
+        mcp { configureServer(client, storage, config) }
     }.start(wait = true)
 }

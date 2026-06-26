@@ -22,6 +22,10 @@ dependencies {
     // .env loader for local secrets (real process env still takes precedence).
     implementation("io.github.cdimascio:dotenv-kotlin:6.5.1")
 
+    // SQLite via JDBC — persistent storage for the background collector's snapshots.
+    // Pure-Java driver bundles native libs; auto-registers org.sqlite.JDBC via ServiceLoader.
+    implementation("org.xerial:sqlite-jdbc:3.49.1.0")
+
     // Ktor HTTP client -> Home Assistant REST API.
     implementation("io.ktor:ktor-client-core:3.4.3")
     implementation("io.ktor:ktor-client-cio:3.4.3")

@@ -6,11 +6,13 @@ import io.modelcontextprotocol.kotlin.sdk.types.ServerCapabilities
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.put
+import java.time.Instant
 
 private val prettyJson = Json { prettyPrint = true }
 
@@ -43,11 +45,25 @@ private fun prop(type: String, description: String) = buildJsonObject {
     put("description", description)
 }
 
+private fun JsonObject?.stringList(key: String): List<String>? =
+    (this?.get(key) as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim() }
+        ?.filter { it.isNotEmpty() }
+
+/** "21.4" -> "21.4", null stays "—". Compact one-decimal-ish formatting for summaries. */
+private fun Double?.fmt(): String = this?.let {
+    if (it == it.toLong().toDouble()) it.toLong().toString() else "%.2f".format(it)
+} ?: "—"
+
 /**
  * Builds the MCP server and registers all Home Assistant tools against [client].
- * Same configured server is used by both the stdio and SSE transports.
+ * The same configured server is used by both the stdio and SSE transports. [storage]
+ * and [config] back the day-18 scheduler tools (`get_summary`, `configure_collection`).
  */
-fun configureServer(client: HomeAssistantClient): Server {
+fun configureServer(
+    client: HomeAssistantClient,
+    storage: Storage,
+    config: CollectionConfig,
+): Server {
     val server = Server(
         Implementation(name = "home-assistant-mcp", version = "0.1.0"),
         ServerOptions(
@@ -194,6 +210,103 @@ fun configureServer(client: HomeAssistantClient): Server {
             }
         } catch (e: HaException) {
             err(e.message)
+        }
+    }
+
+    // 5) get_summary --------------------------------------------------------
+    server.addTool(
+        name = "get_summary",
+        description = "Aggregate the background collector's stored measurements over a time window. " +
+            "Returns count + min/max/avg/last per entity. Use this on a schedule to get a periodic " +
+            "digest of tracked sensors (temperature, humidity, energy, …) collected 24/7 by the server.",
+        inputSchema = ToolSchema(
+            properties = buildJsonObject {
+                put("entity_id", prop("string", "Optional entity id to summarise. Omit to summarise every tracked entity."))
+                put("period", prop("string", "Time window back from now: '1h', '24h', '7d', '30m', '60s'. Default '24h'."))
+                put("metric", prop("string", "Headline metric to highlight: 'avg' (default), 'min', 'max' or 'last'."))
+            },
+        ),
+    ) { request ->
+        val periodRaw = request.arguments.string("period") ?: "24h"
+        val periodSec = parseDurationSeconds(periodRaw)
+        val metric = (request.arguments.string("metric")?.trim()?.lowercase() ?: "avg")
+            .takeIf { it in setOf("avg", "min", "max", "last") } ?: "avg"
+        if (periodSec == null) {
+            err("Invalid 'period' '$periodRaw'. Use forms like '1h', '24h', '7d', '30m', '60s'.")
+        } else try {
+            val since = Instant.now().minusSeconds(periodSec).epochSecond
+            val requested = request.arguments.string("entity_id")?.trim()?.takeIf { it.isNotEmpty() }
+            val entities = requested?.let { listOf(it) } ?: storage.knownEntities()
+
+            if (entities.isEmpty()) {
+                text("No measurements stored yet. The collector writes a snapshot every ${config.intervalSeconds}s; check back after the next cycle.")
+            } else {
+                val summaries = entities.map { storage.summarize(it, since) }
+                val withData = summaries.filter { it.count > 0 }
+                if (withData.isEmpty()) {
+                    text("No data points in the last $periodRaw for ${if (requested != null) requested else "any tracked entity"}.")
+                } else {
+                    val body = withData.joinToString("\n") { s ->
+                        val headline = when (metric) {
+                            "min" -> "min=${s.min.fmt()}"
+                            "max" -> "max=${s.max.fmt()}"
+                            "last" -> "last=${s.last?.fmt() ?: s.lastState ?: "—"}"
+                            else -> "avg=${s.avg.fmt()}"
+                        }
+                        buildString {
+                            append("- ${s.entityId}: $headline  ")
+                            append("(min=${s.min.fmt()}, max=${s.max.fmt()}, avg=${s.avg.fmt()}, ")
+                            append("last=${s.last?.fmt() ?: s.lastState ?: "—"}, n=${s.count})")
+                        }
+                    }
+                    text("Summary over last $periodRaw (metric=$metric):\n$body")
+                }
+            }
+        } catch (e: Exception) {
+            err("Failed to build summary: ${e.message}")
+        }
+    }
+
+    // 6) configure_collection -----------------------------------------------
+    server.addTool(
+        name = "configure_collection",
+        description = "View or change what the background collector tracks and how often. Pass " +
+            "'entities' and/or 'interval' to update (changes apply on the next cycle and persist across " +
+            "restarts); pass nothing to just read the current settings.",
+        inputSchema = ToolSchema(
+            properties = buildJsonObject {
+                put("entities", buildJsonObject {
+                    put("type", "array")
+                    put("description", "Entity ids to track, e.g. ['sensor.outdoor_temp','sensor.humidity']. Empty array = track all entities.")
+                    put("items", buildJsonObject { put("type", "string") })
+                })
+                put("interval", prop("string", "Collection interval: '60s', '5m', '1h'. Minimum 1s."))
+            },
+        ),
+    ) { request ->
+        try {
+            val newEntities = request.arguments.stringList("entities")
+            val intervalRaw = request.arguments.string("interval")
+            val newInterval = intervalRaw?.let { parseDurationSeconds(it) }
+            if (intervalRaw != null && newInterval == null) {
+                err("Invalid 'interval' '$intervalRaw'. Use forms like '60s', '5m', '1h'.")
+            } else {
+                if (newEntities != null || newInterval != null) {
+                    val snap = config.update(entities = newEntities, intervalSeconds = newInterval)
+                    storage.saveConfig(snap)
+                }
+                val snap = config.snapshot()
+                val tracked = snap.entities.takeIf { it.isNotEmpty() }?.joinToString(", ") ?: "(all entities)"
+                text(
+                    """
+                    Collection settings${if (newEntities != null || newInterval != null) " updated" else ""}:
+                    - interval: ${snap.intervalSeconds}s
+                    - tracking: $tracked
+                    """.trimIndent(),
+                )
+            }
+        } catch (e: Exception) {
+            err("Failed to configure collection: ${e.message}")
         }
     }
 

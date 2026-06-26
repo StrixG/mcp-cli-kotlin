@@ -1,0 +1,25 @@
+# Build outputs — rebuilt inside the image.
+**/build/
+.gradle/
+build/
+
+# Local secrets — pass at runtime via env / --env-file, never bake in.
+**/.env
+
+# Local SQLite data — provided by the /data volume.
+**/data/*.db
+server/data/
+
+# VCS / IDE / OS noise.
+.git/
+.gitignore
+.idea/
+*.iml
+.vscode/
+**/*.log
+.DS_Store
+
+# Docs / docker meta not needed in the build context.
+Dockerfile
+.dockerignore
+README.md

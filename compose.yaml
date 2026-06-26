@@ -1,0 +1,22 @@
+# Home Assistant MCP server — SSE transport on :3001.
+# Secrets come from server/.env (HA_BASE_URL, HA_TOKEN, collector knobs); the
+# real process env still wins, same as a bare jar run.
+services:
+  ha-mcp:
+    build: .
+    image: ha-mcp
+    # Override DB_PATH only — it must point inside the named volume below. The
+    # rest (HA_BASE_URL/HA_TOKEN/COLLECT_INTERVAL/…) load from server/.env.
+    env_file:
+      - server/.env
+    environment:
+      DB_PATH: /data/measurements.db
+    ports:
+      - "3001:3001"
+    volumes:
+      - ha_mcp_data:/data
+    restart: unless-stopped
+    command: ["--sse", "3001"]
+
+volumes:
+  ha_mcp_data:
