@@ -22,7 +22,9 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import java.io.Closeable
 import java.net.ConnectException
+import java.net.URLEncoder
 import java.net.UnknownHostException
+import java.time.Instant
 
 /**
  * Failure that carries an agent-friendly message (no stack trace). Tool handlers
@@ -80,6 +82,26 @@ class HomeAssistantClient(
     /** GET /api/states — all entities with their current state. */
     suspend fun getStates(): List<EntityState> =
         send(HttpMethod.Get, "states").body()
+
+    /**
+     * GET /api/history/period/<start>?filter_entity_id=…&end_time=… — every recorded
+     * state change for [entityIds] in `[start, end]`.
+     *
+     * HA returns an array of arrays: one inner list per entity, chronologically ordered,
+     * each element the same shape as [EntityState]. The first element of each list is the
+     * state already in effect at [start], so overlapping windows re-emit the boundary row
+     * (the caller's dedup handles it). Timestamps and the entity filter are URL-encoded —
+     * ISO timestamps carry `:` and a `+00:00` offset.
+     */
+    suspend fun getHistory(entityIds: List<String>, start: Instant, end: Instant): List<List<EntityState>> {
+        val startIso = URLEncoder.encode(start.toString(), Charsets.UTF_8)
+        val endIso = URLEncoder.encode(end.toString(), Charsets.UTF_8)
+        val filter = URLEncoder.encode(entityIds.joinToString(","), Charsets.UTF_8)
+        return send(
+            HttpMethod.Get,
+            "history/period/$startIso?filter_entity_id=$filter&end_time=$endIso",
+        ).body()
+    }
 
     /** GET /api/states/<entity_id> — one entity. */
     suspend fun getState(entityId: String): EntityState =

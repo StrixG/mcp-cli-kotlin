@@ -234,7 +234,7 @@ fun configureServer(
         if (periodSec == null) {
             err("Invalid 'period' '$periodRaw'. Use forms like '1h', '24h', '7d', '30m', '60s'.")
         } else try {
-            val since = Instant.now().minusSeconds(periodSec).epochSecond
+            val since = Instant.now().minusSeconds(periodSec).toEpochMilli()
             val requested = request.arguments.string("entity_id")?.trim()?.takeIf { it.isNotEmpty() }
             val entities = requested?.let { listOf(it) } ?: storage.knownEntities()
 

@@ -30,7 +30,7 @@ class StorageTest {
                 m("sensor.temp", "22", now.minusSeconds(100)),
             ),
         )
-        val s = storage.summarize("sensor.temp", now.minusSeconds(3600).epochSecond)
+        val s = storage.summarize("sensor.temp", now.minusSeconds(3600).toEpochMilli())
         assertEquals(3, s.count)
         assertEquals(20.0, s.min)
         assertEquals(24.0, s.max)
@@ -48,7 +48,7 @@ class StorageTest {
                 m("sensor.temp", "30", now.minusSeconds(600)),  // 10m ago — inside
             ),
         )
-        val s = storage.summarize("sensor.temp", now.minusSeconds(3600).epochSecond)
+        val s = storage.summarize("sensor.temp", now.minusSeconds(3600).toEpochMilli())
         assertEquals(1, s.count)
         assertEquals(30.0, s.avg)
     }
@@ -62,7 +62,7 @@ class StorageTest {
                 m("binary_sensor.door", "off", now.minusSeconds(60)),
             ),
         )
-        val s = storage.summarize("binary_sensor.door", now.minusSeconds(3600).epochSecond)
+        val s = storage.summarize("binary_sensor.door", now.minusSeconds(3600).toEpochMilli())
         assertEquals(2, s.count)
         assertNull(s.avg)               // no numeric values
         assertNull(s.last)              // last value is non-numeric
@@ -95,6 +95,43 @@ class StorageTest {
             ),
         )
         assertEquals(listOf("sensor.a", "sensor.b"), storage.knownEntities())
+    }
+
+    @Test
+    fun `insertAll ignores duplicate entity_id plus ts`() {
+        val ts = Instant.parse("2026-06-27T10:15:30Z")
+        storage.insertAll(listOf(m("sensor.temp", "20", ts), m("sensor.temp", "99", ts)))
+        val s = storage.summarize("sensor.temp", 0)
+        assertEquals(1, s.count)          // second row with the same (entity, ts) is dropped
+        assertEquals(20.0, s.avg)         // first write wins
+    }
+
+    @Test
+    fun `sub-second distinct timestamps both persist`() {
+        val base = Instant.parse("2026-06-27T10:15:30Z")
+        storage.insertAll(
+            listOf(
+                m("sensor.temp", "20", base.plusMillis(100)),
+                m("sensor.temp", "24", base.plusMillis(900)),
+            ),
+        )
+        assertEquals(2, storage.summarize("sensor.temp", 0).count)
+    }
+
+    @Test
+    fun `latestTimestamp returns newest stored point`() {
+        val now = Instant.parse("2026-06-27T10:15:30Z")
+        assertNull(storage.latestTimestamp(listOf("sensor.temp")))
+        storage.insertAll(
+            listOf(
+                m("sensor.temp", "1", now.minusSeconds(60)),
+                m("sensor.temp", "2", now),
+                m("sensor.other", "3", now.plusSeconds(60)),
+            ),
+        )
+        assertEquals(now, storage.latestTimestamp(listOf("sensor.temp")))
+        // Empty list = across all entities.
+        assertEquals(now.plusSeconds(60), storage.latestTimestamp(emptyList()))
     }
 
     @Test

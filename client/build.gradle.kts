@@ -26,6 +26,10 @@ dependencies {
     // .env loader for the DeepSeek API key (real process env still takes precedence).
     implementation("io.github.cdimascio:dotenv-kotlin:6.5.1")
 
+    // SLF4J no-op backend: silences the MCP SDK's transitive kotlin-logging so the
+    // interactive REPL terminal stays clean (no NOP-provider warning, no log noise).
+    implementation("org.slf4j:slf4j-nop:2.0.18")
+
     // Terminal markdown rendering: Markdown widget -> ANSI, auto-downgrades to
     // plain text when stdout isn't a TTY. Pulls Mordant core transitively.
     implementation("com.github.ajalt.mordant:mordant-markdown:3.0.2")

@@ -41,12 +41,20 @@ stack trace on bad input, unreachable HA, 401, or unknown entity).
 ### Background collector & scheduler (day 18)
 
 The server runs a **24/7 background collector**: a coroutine scheduler
-(`Collector.kt`, own `SupervisorJob` scope) that every `COLLECT_INTERVAL` polls
-`GET /api/states`, snapshots the `TRACKED_ENTITIES`, and persists each reading to
-**SQLite** (`Storage.kt`). It keeps running with **no agent connected**, and one
-failed cycle (HA briefly unreachable) just logs to stderr and retries on the next
-tick — it never tears the loop down. Optional `RETENTION_DAYS` prunes old rows each
-cycle. Data lives on disk (`DB_PATH`), so it **survives restarts**.
+(`Collector.kt`, own `SupervisorJob` scope) that every `COLLECT_INTERVAL` persists
+readings to **SQLite** (`Storage.kt`). For tracked entities it pulls HA's **History
+API** (`GET /api/history/period`) for the window `[lastEnd, now]` and stores **every
+state change** HA's Recorder logged since the last tick — so short-lived changes
+between ticks are captured, not sampled over (zero loss, bounded by Recorder
+retention). It resumes from the newest stored row after a restart, backfilling the
+downtime gap; overlapping windows are de-duplicated via a `UNIQUE(entity_id, ts)`
+index + `INSERT OR IGNORE`. With **no `TRACKED_ENTITIES`** (track-all) it falls back
+to a cheap `GET /api/states` snapshot, since History without an entity filter would
+return every entity's full change log each cycle. It keeps running with **no agent
+connected**, and one failed cycle (HA briefly unreachable) just logs to stderr and
+retries on the next tick — it never tears the loop down. Optional `RETENTION_DAYS`
+prunes old rows each cycle. Data lives on disk (`DB_PATH`), so it **survives
+restarts**.
 
 Two new MCP tools sit on top of that store:
 
@@ -62,8 +70,9 @@ Two new MCP tools sit on top of that store:
 
 Storage schema: `measurements(entity_id, state, value, ts, attributes)` —
 `value` is the numeric parse of `state` (null for `on`/`home`/… states), `ts` is
-epoch seconds. A `config(id=1, entities, interval_seconds)` single row holds the
-persisted collection settings.
+epoch **millis** (preserves sub-second changes), unique per `(entity_id, ts)`. A
+`config(id=1, entities, interval_seconds)` single row holds the persisted collection
+settings.
 
 ### Prerequisites
 
@@ -92,8 +101,8 @@ Collector knobs (non-secret, all optional with sane defaults):
 
 | Var               | Default                         | Meaning                                                        |
 |-------------------|---------------------------------|----------------------------------------------------------------|
-| `COLLECT_INTERVAL`| `60s`                           | Poll/persist cadence. Forms: `60s`, `5m`, `1h`. **Short for demos.** |
-| `TRACKED_ENTITIES`| *(empty = all entities)*        | Comma-separated entity ids to snapshot.                        |
+| `COLLECT_INTERVAL`| `60s`                           | Catch-up/persist cadence. Forms: `60s`, `5m`, `1h`. **Short for demos.** |
+| `TRACKED_ENTITIES`| *(empty = all entities)*        | Comma-separated entity ids — history-backed (zero loss). Empty = all entities via snapshot fallback. |
 | `DB_PATH`         | `<server>/data/measurements.db` | SQLite file (created if missing; survives restarts).           |
 | `RETENTION_DAYS`  | *(unset = keep forever)*        | Prune measurements older than N days each cycle.               |
 
@@ -128,11 +137,11 @@ export TRACKED_ENTITIES="sensor.outdoor_temperature,sensor.living_room_humidity"
 export DB_PATH="server/data/measurements.db"
 
 java -jar server/build/libs/server-all.jar --stdio
-# stderr shows, every minute:
-#   [collector] persisted 2 snapshot(s) at 2026-06-25T19:00:00Z
+# stderr shows, every minute (history-backed for tracked entities):
+#   [collector] persisted 3 change(s) over [2026-06-25T18:59:00Z, 2026-06-25T19:00:00Z]
 ```
 
-It writes snapshots **even with no agent attached**. Leave it running, then point an
+It records changes **even with no agent attached**. Leave it running, then point an
 agent at the same jar; the persisted history is already there.
 
 #### Agent pulls a summary on a schedule
@@ -266,7 +275,7 @@ front of `:3001`. Point your agent's SSE MCP config at `https://<vps>/sse`.
 **Day 18 (scheduler) — what to show:**
 
 - Start the server with `COLLECT_INTERVAL=60s` and watch stderr: every minute a
-  `[collector] persisted N snapshot(s) at …` line proves the background task fires on
+  `[collector] persisted N change(s) over […]` line proves the background task fires on
   schedule and persists — **with no agent connected**.
 - Have the agent call `get_summary` (e.g. `{"period":"5m"}`) and read back the
   min/max/avg/last digest of the accumulated data — the agent **using the result**.

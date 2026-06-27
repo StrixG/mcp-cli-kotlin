@@ -57,7 +57,7 @@ class Storage(jdbcUrl: String) : Closeable {
                         entity_id  TEXT    NOT NULL,
                         state      TEXT    NOT NULL,
                         value      REAL,
-                        ts         INTEGER NOT NULL,            -- epoch seconds
+                        ts         INTEGER NOT NULL,            -- epoch millis
                         attributes TEXT    NOT NULL DEFAULT '{}'
                     )
                     """.trimIndent(),
@@ -65,6 +65,16 @@ class Storage(jdbcUrl: String) : Closeable {
                 st.executeUpdate(
                     "CREATE INDEX IF NOT EXISTS idx_measurements_entity_ts ON measurements(entity_id, ts)",
                 )
+                // Dedup guard: history windows overlap and restarts re-pull, so the same
+                // (entity_id, ts) can be offered repeatedly. The unique index + INSERT OR
+                // IGNORE in insertAll collapses those to a single row.
+                st.executeUpdate(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_measurements_entity_ts_uniq ON measurements(entity_id, ts)",
+                )
+                // One-time migration: ts was epoch *seconds* before the history-backed
+                // collector; now it is epoch *millis*. Seconds values are < 1e11; after the
+                // ×1000 they exceed it, so this never re-runs (idempotent).
+                st.executeUpdate("UPDATE measurements SET ts = ts * 1000 WHERE ts < 100000000000")
                 st.executeUpdate(
                     """
                     CREATE TABLE IF NOT EXISTS config (
@@ -83,13 +93,13 @@ class Storage(jdbcUrl: String) : Closeable {
         if (measurements.isEmpty()) return
         synchronized(lock) {
             conn.prepareStatement(
-                "INSERT INTO measurements(entity_id, state, value, ts, attributes) VALUES (?,?,?,?,?)",
+                "INSERT OR IGNORE INTO measurements(entity_id, state, value, ts, attributes) VALUES (?,?,?,?,?)",
             ).use { ps ->
                 for (m in measurements) {
                     ps.setString(1, m.entityId)
                     ps.setString(2, m.state)
                     if (m.value != null) ps.setDouble(3, m.value) else ps.setNull(3, java.sql.Types.REAL)
-                    ps.setLong(4, m.timestamp.epochSecond)
+                    ps.setLong(4, m.timestamp.toEpochMilli())
                     ps.setString(5, m.attributesJson)
                     ps.addBatch()
                 }
@@ -112,7 +122,7 @@ class Storage(jdbcUrl: String) : Closeable {
      * from the numeric `value` column (null when no numeric points exist); `lastState`
      * is the most recent raw state regardless of whether it parsed as a number.
      */
-    fun summarize(entityId: String, sinceEpochSecond: Long): EntitySummary = synchronized(lock) {
+    fun summarize(entityId: String, sinceEpochMilli: Long): EntitySummary = synchronized(lock) {
         var count = 0
         var min: Double? = null
         var max: Double? = null
@@ -124,7 +134,7 @@ class Storage(jdbcUrl: String) : Closeable {
             """.trimIndent(),
         ).use { ps ->
             ps.setString(1, entityId)
-            ps.setLong(2, sinceEpochSecond)
+            ps.setLong(2, sinceEpochMilli)
             ps.executeQuery().use { rs ->
                 if (rs.next()) {
                     count = rs.getInt(1)
@@ -143,18 +153,18 @@ class Storage(jdbcUrl: String) : Closeable {
             "SELECT state, value, ts FROM measurements WHERE entity_id = ? AND ts >= ? ORDER BY ts DESC LIMIT 1",
         ).use { ps ->
             ps.setString(1, entityId)
-            ps.setLong(2, sinceEpochSecond)
+            ps.setLong(2, sinceEpochMilli)
             ps.executeQuery().use { rs ->
                 if (rs.next()) {
                     lastState = rs.getString(1)
                     lastValue = rs.getObject(2)?.let { rs.getDouble(2) }
-                    lastTs = Instant.ofEpochSecond(rs.getLong(3))
+                    lastTs = Instant.ofEpochMilli(rs.getLong(3))
                 }
             }
         }
         conn.prepareStatement("SELECT COUNT(*) FROM measurements WHERE entity_id = ? AND ts >= ?").use { ps ->
             ps.setString(1, entityId)
-            ps.setLong(2, sinceEpochSecond)
+            ps.setLong(2, sinceEpochMilli)
             ps.executeQuery().use { rs -> if (rs.next()) totalCount = rs.getInt(1) }
         }
         EntitySummary(
@@ -172,8 +182,28 @@ class Storage(jdbcUrl: String) : Closeable {
     /** Delete measurements older than [cutoff]. Returns rows removed. */
     fun purgeOlderThan(cutoff: Instant): Int = synchronized(lock) {
         conn.prepareStatement("DELETE FROM measurements WHERE ts < ?").use { ps ->
-            ps.setLong(1, cutoff.epochSecond)
+            ps.setLong(1, cutoff.toEpochMilli())
             ps.executeUpdate()
+        }
+    }
+
+    /**
+     * Latest stored timestamp among [entityIds] (or across all entities if the list is
+     * empty), or null when nothing is stored. The collector uses this to resume its
+     * history window after a restart so any downtime gap is backfilled.
+     */
+    fun latestTimestamp(entityIds: List<String>): Instant? = synchronized(lock) {
+        val sql = if (entityIds.isEmpty()) {
+            "SELECT MAX(ts) FROM measurements"
+        } else {
+            val placeholders = entityIds.joinToString(",") { "?" }
+            "SELECT MAX(ts) FROM measurements WHERE entity_id IN ($placeholders)"
+        }
+        conn.prepareStatement(sql).use { ps ->
+            entityIds.forEachIndexed { i, id -> ps.setString(i + 1, id) }
+            ps.executeQuery().use { rs ->
+                if (rs.next() && rs.getObject(1) != null) Instant.ofEpochMilli(rs.getLong(1)) else null
+            }
         }
     }
 
