@@ -12,7 +12,10 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.put
+import java.io.File
 import java.time.Instant
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 
 private val prettyJson = Json { prettyPrint = true }
 
@@ -63,6 +66,7 @@ fun configureServer(
     client: HomeAssistantClient,
     storage: Storage,
     config: CollectionConfig,
+    reportsDir: java.io.File,
 ): Server {
     val server = Server(
         Implementation(name = "home-assistant-mcp", version = "0.1.0"),
@@ -310,5 +314,77 @@ fun configureServer(
         }
     }
 
+    // 7) save_report -------------------------------------------------------
+    server.addTool(
+        name = "save_report",
+        description = "Save a text report to a file on the server and return its path. Use this as the " +
+            "final step of a pipeline when the user wants to save/export a summary or report: pass the " +
+            "text produced by an earlier tool (e.g. the output of get_summary) as 'content'. The server " +
+            "writes exactly the content it is given — it does not call any AI.",
+        inputSchema = ToolSchema(
+            properties = buildJsonObject {
+                put("content", prop("string", "The report text to write, e.g. the summary returned by get_summary."))
+                put("filename", prop("string", "Optional file name (basename only, no directories). Default: report-YYYYMMDD-HHmmss.<format>."))
+                put("format", prop("string", "File format / extension: 'md' (default), 'txt' or 'json'."))
+            },
+            required = listOf("content"),
+        ),
+    ) { request ->
+        val content = request.arguments.string("content")
+        if (content.isNullOrEmpty()) {
+            err("Parameter 'content' is required (the report text to save).")
+        } else try {
+            val saved = writeReport(
+                baseDir = reportsDir,
+                content = content,
+                filename = request.arguments.string("filename"),
+                format = request.arguments.string("format"),
+            )
+            text("Saved report to ${saved.absolutePath} (${saved.length()} bytes).")
+        } catch (e: IllegalArgumentException) {
+            err(e.message)
+        } catch (e: Exception) {
+            err("Failed to save report: ${e.message}")
+        }
+    }
+
     return server
+}
+
+/** Report formats save_report accepts; the value is also used as the file extension. */
+private val REPORT_EXTS = setOf("md", "txt", "json")
+
+private val REPORT_TS = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
+
+/**
+ * Write [content] (verbatim, UTF-8) to a file under [baseDir]. [filename] is sanitised to a
+ * bare basename — any path component, '..' or separator is rejected to prevent traversal —
+ * and defaults to `report-YYYYMMDD-HHmmss.<format>` when omitted. [format] selects the
+ * extension for generated/extension-less names (md/txt/json, default md). Returns the file.
+ *
+ * Top-level + `internal` so it is unit-testable directly, without MCP plumbing. Throws
+ * [IllegalArgumentException] on an unsupported format or an unsafe filename; the tool handler
+ * turns that into a readable `err(...)` message.
+ */
+internal fun writeReport(baseDir: File, content: String, filename: String?, format: String?): File {
+    val ext = format?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+        ?.let { if (it in REPORT_EXTS) it else throw IllegalArgumentException("Unsupported format '$it'. Use md, txt or json.") }
+        ?: "md"
+
+    val name = filename?.trim()?.takeIf { it.isNotEmpty() }?.let { raw ->
+        // Basename only: reject anything that escapes the reports directory.
+        if (raw != File(raw).name || raw.contains("..") || raw.contains('/') || raw.contains('\\')) {
+            throw IllegalArgumentException("'filename' must be a bare name without path separators, got '$raw'.")
+        }
+        if (raw.contains('.')) raw else "$raw.$ext"
+    } ?: "report-${ZonedDateTime.now().format(REPORT_TS)}.$ext"
+
+    baseDir.mkdirs()
+    val target = File(baseDir, name).canonicalFile
+    // Defense in depth: the resolved path must stay inside the sandbox.
+    if (!target.canonicalPath.startsWith(baseDir.canonicalFile.canonicalPath + File.separator)) {
+        throw IllegalArgumentException("Refusing to write outside the reports directory.")
+    }
+    target.writeText(content, Charsets.UTF_8)
+    return target
 }

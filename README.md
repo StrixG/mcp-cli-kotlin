@@ -26,6 +26,7 @@ Assistant REST API and exposes smart-home tools to an agent.
 | `get_sensor`    | `entity_id`                         | —          | numeric value + unit                               |
 | `get_summary`   | —                                   | `entity_id`, `period`, `metric` | aggregated min/max/avg/last + point count over the collector's stored data |
 | `configure_collection` | —                            | `entities`, `interval` | view/update what is tracked and how often (persisted) |
+| `save_report`   | `content`                           | `filename`, `format` | writes the text to a file under `OUTPUT_DIR`; returns the saved path + size |
 
 Each tool has a human-readable `description` and a strict `inputSchema`
 (required params enforced; the server returns a readable error instead of a
@@ -74,6 +75,28 @@ epoch **millis** (preserves sub-second changes), unique per `(entity_id, ts)`. A
 `config(id=1, entities, interval_seconds)` single row holds the persisted collection
 settings.
 
+### Composing tools into a pipeline (day 19)
+
+The tools are designed to **chain** — the agent (not any hard-coded sequence) picks
+the order from the user's request and feeds one tool's output into the next:
+
+```
+get_summary  →  (aggregated text)  →  save_report  →  file on disk
+   fetch/process step                    save step
+```
+
+- **`save_report`** — `{ content, filename?, format? }`. Writes `content` verbatim
+  (UTF-8) to a file under `OUTPUT_DIR`, creating the dir if needed, and returns the
+  absolute path + byte count. `filename` is sanitised to a **bare basename** (any
+  `/`, `\` or `..` is rejected — no path traversal); omit it for a timestamped
+  `report-YYYYMMDD-HHmmss.<format>`. `format` is `md` (default), `txt` or `json` and
+  only picks the extension — the server writes exactly what it is given and **never
+  calls an LLM**.
+
+A single natural request such as *"summarise the temperature sensors over the last
+hour and save it to a file"* makes the agent call `get_summary` then `save_report`,
+passing the summary text as `content` — the chain runs automatically.
+
 ### Prerequisites
 
 - **JDK 17+** (tested on JDK 21). Gradle not needed — use the wrapper.
@@ -105,6 +128,7 @@ Collector knobs (non-secret, all optional with sane defaults):
 | `TRACKED_ENTITIES`| *(empty = all entities)*        | Comma-separated entity ids — history-backed (zero loss). Empty = all entities via snapshot fallback. |
 | `DB_PATH`         | `<server>/data/measurements.db` | SQLite file (created if missing; survives restarts).           |
 | `RETENTION_DAYS`  | *(unset = keep forever)*        | Prune measurements older than N days each cycle.               |
+| `OUTPUT_DIR`      | `<server>/reports`              | Directory `save_report` writes report files into (created if missing). |
 
 > Persisted `configure_collection` settings (in the DB) win over `COLLECT_INTERVAL`/
 > `TRACKED_ENTITIES` env on the next start — the env values only seed the first run.

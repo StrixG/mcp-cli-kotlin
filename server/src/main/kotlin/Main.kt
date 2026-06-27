@@ -103,6 +103,15 @@ fun main(args: Array<String>) {
     )
     if (stored == null) storage.saveConfig(config.snapshot())
 
+    // Day 19: directory the save_report tool writes into. Configurable like DB_PATH;
+    // default keeps reports under the server module. Parent dirs created so a fresh
+    // checkout works without manual mkdir.
+    val outputDir = dotenv["OUTPUT_DIR"]?.trim()?.takeIf { it.isNotEmpty() }
+        ?: dotenv["REPORTS_DIR"]?.trim()?.takeIf { it.isNotEmpty() }
+        ?: java.io.File(envDir ?: ".", "reports").path
+    val reportsDir = java.io.File(outputDir).absoluteFile
+    reportsDir.mkdirs()
+
     val retentionDays = dotenv["RETENTION_DAYS"]?.trim()?.toLongOrNull()
     val collector = Collector(client, storage, config, retentionDays)
     collector.start()
@@ -120,8 +129,8 @@ fun main(args: Array<String>) {
     val port = args.getOrNull(1)?.toIntOrNull() ?: 3001
 
     when (command) {
-        "--stdio" -> runStdio(client, storage, config)
-        "--sse", "--http" -> runSse(client, storage, config, port)
+        "--stdio" -> runStdio(client, storage, config, reportsDir)
+        "--sse", "--http" -> runSse(client, storage, config, reportsDir, port)
         else -> {
             log("Unknown command: $command. Use --stdio (default) or --sse [port].")
             exitProcess(1)
@@ -130,9 +139,9 @@ fun main(args: Array<String>) {
 }
 
 /** Standard I/O transport: communicate over stdin/stdout with the parent process. */
-private fun runStdio(client: HomeAssistantClient, storage: Storage, config: CollectionConfig) {
+private fun runStdio(client: HomeAssistantClient, storage: Storage, config: CollectionConfig, reportsDir: java.io.File) {
     log("Home Assistant MCP server starting on stdio…")
-    val server = configureServer(client, storage, config)
+    val server = configureServer(client, storage, config, reportsDir)
     val transport = StdioServerTransport(
         System.`in`.asSource().buffered(),
         protocolOut.asSink().buffered(),
@@ -153,9 +162,9 @@ private fun runStdio(client: HomeAssistantClient, storage: Storage, config: Coll
 }
 
 /** HTTP + SSE transport via the SDK's Ktor plugin. Endpoint: http://host:port/sse */
-private fun runSse(client: HomeAssistantClient, storage: Storage, config: CollectionConfig, port: Int) {
+private fun runSse(client: HomeAssistantClient, storage: Storage, config: CollectionConfig, reportsDir: java.io.File, port: Int) {
     log("Home Assistant MCP server starting on http://0.0.0.0:$port/sse")
     embeddedServer(CIO, host = "0.0.0.0", port = port) {
-        mcp { configureServer(client, storage, config) }
+        mcp { configureServer(client, storage, config, reportsDir) }
     }.start(wait = true)
 }

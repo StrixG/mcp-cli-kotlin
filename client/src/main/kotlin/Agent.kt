@@ -19,6 +19,10 @@ private val SYSTEM_PROMPT = """
     when the on/off state flips; adjusting brightness or color on an already-on light
     leaves `last_changed` frozen while `last_updated` advances. A frozen `last_changed`
     does not mean the device is unresponsive.
+
+    When the user asks to save or export a summary or report, first produce the summary
+    (e.g. with get_summary), then call save_report with that text as `content` to write it
+    to a file, and tell the user the saved path.
 """.trimIndent()
 
 /** Human-readable local timestamp, e.g. "Saturday, 2026-06-27 14:05 MSK (UTC+03:00)". */

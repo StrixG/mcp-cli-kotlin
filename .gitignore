@@ -43,3 +43,6 @@ local.properties
 *.db-wal
 *.db-shm
 **/data/
+
+# Generated reports (save_report tool, day 19)
+**/reports/
