@@ -2,6 +2,8 @@ import io.modelcontextprotocol.kotlin.sdk.client.Client
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import io.modelcontextprotocol.kotlin.sdk.types.Tool
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 
 private const val MAX_TOOL_ITERATIONS = 8
 
@@ -19,6 +21,17 @@ private val SYSTEM_PROMPT = """
     does not mean the device is unresponsive.
 """.trimIndent()
 
+/** Human-readable local timestamp, e.g. "Saturday, 2026-06-27 14:05 MSK (UTC+03:00)". */
+private val CLOCK_FORMAT =
+    DateTimeFormatter.ofPattern("EEEE, yyyy-MM-dd HH:mm zzz (xxx)")
+
+/** System prompt plus a fresh "current time" line so relative queries resolve correctly. */
+private fun systemPrompt(): String {
+    val now = ZonedDateTime.now().format(CLOCK_FORMAT)
+    return "$SYSTEM_PROMPT\n\nCurrent local date and time: $now. " +
+        "Use this for any relative time reference (today, now, last hour, this morning)."
+}
+
 /** Flatten a tool result's text blocks into one string (mirrors Main's helper). */
 private fun CallToolResult.textContent(): String =
     content.filterIsInstance<TextContent>().mapNotNull { it.text }.joinToString("\n")
@@ -30,7 +43,7 @@ private fun CallToolResult.textContent(): String =
  */
 suspend fun runAgentRepl(mcpClient: Client, tools: List<Tool>, deepseek: DeepSeekClient) {
     val toolDefs = toDeepSeekTools(tools)
-    val history = mutableListOf(ChatMessage(role = "system", content = SYSTEM_PROMPT))
+    val history = mutableListOf(ChatMessage(role = "system", content = systemPrompt()))
     val stdin = System.`in`.bufferedReader(Charsets.UTF_8)
 
     println("\nAgent ready. Type a goal (e.g. \"turn on the kitchen light\"). 'exit' to quit.")
@@ -41,6 +54,7 @@ suspend fun runAgentRepl(mcpClient: Client, tools: List<Tool>, deepseek: DeepSee
         if (goal.isEmpty()) continue
         if (goal.equals("exit", ignoreCase = true) || goal.equals("quit", ignoreCase = true)) break
 
+        history[0] = ChatMessage(role = "system", content = systemPrompt())
         history += ChatMessage(role = "user", content = goal)
         try {
             runTurn(mcpClient, toolDefs, deepseek, history)
