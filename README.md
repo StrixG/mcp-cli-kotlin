@@ -5,7 +5,7 @@ Multi-module Gradle project. Two independent runnables:
 | Module     | What it is                                                                 | Run                       |
 |------------|----------------------------------------------------------------------------|---------------------------|
 | `:server`  | Own MCP server around the **Home Assistant** REST API.                     | `./gradlew :server:run`   |
-| `:client`  | Minimal MCP **client** (handshake + `tools/list` + `tools/call` over stdio). | `./gradlew :client:run`   |
+| `:client`  | MCP **client / agent** — connects to **several** MCP servers at once, aggregates their tools, and routes the LLM's calls to each. | `./gradlew :client:run`   |
 
 The wrapper (`./gradlew`) lives at the repo root; each module builds and runs on its own.
 
@@ -287,6 +287,44 @@ front of `:3001`. Point your agent's SSE MCP config at `https://<vps>/sse`.
 > Note: the bundled SSE setup allows any origin for convenience — restrict CORS
 > and require TLS before exposing it publicly.
 
+#### Authorization (OAuth 2.1) — protect the cloud server (day 20)
+
+When published, the SSE transport is an **OAuth 2.1 protected resource** per the
+[MCP authorization spec](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization).
+The server embeds its own authorization server — no external IdP — and issues RS256
+JWTs. Auth is **on by default** for `--sse`; stdio stays unauthenticated (it takes
+credentials from the environment, per the spec).
+
+Set in `server/.env` (see `.env.example`):
+
+```bash
+AUTH_ENABLED=true
+PUBLIC_URL=https://mcp.example.com      # canonical URL: JWT issuer + audience + metadata base
+OAUTH_CLIENT_ID=ha-mcp-cli              # seeded client for the headless agent
+OAUTH_CLIENT_SECRET=<long-random>
+OWNER_PASSWORD=<for the browser login>  # gates the authorization_code consent step
+# JWT_KEY_PATH=/data/oauth-signing-key.json   # keep on a durable volume (tokens survive restarts)
+```
+
+What the server exposes:
+
+- `GET /.well-known/oauth-protected-resource` — advertises the authorization server (RFC 9728).
+- `GET /.well-known/oauth-authorization-server` — endpoints + PKCE `S256` (RFC 8414).
+- `GET /.well-known/jwks.json` — the public verification key.
+- `POST /register` — dynamic client registration (RFC 7591).
+- `GET/POST /authorize`, `POST /token` — authorization_code + PKCE **and** client_credentials.
+
+Unauthenticated MCP requests get `401` with a `WWW-Authenticate` header pointing at the
+metadata; tokens are validated for signature, expiry, and **audience = `PUBLIC_URL`** (RFC 8707),
+so a token minted for another resource can't be replayed here.
+
+> **TLS is required by the spec** for the OAuth endpoints and (non-loopback) redirect URIs.
+> Terminate TLS at the reverse proxy; the container stays HTTP internally and `PUBLIC_URL`
+> is the public `https://` URL. To run without auth (local/dev only), set `AUTH_ENABLED=false`.
+
+The `:client` speaks this automatically — add an `auth` block to its `servers.json` entry
+(see [MCP client](#mcp-client-client) and `client/servers.json`).
+
 ### What to show in the demo video
 
 - Start the server and connect from MCP Inspector (or your assistant); show the
@@ -388,6 +426,89 @@ redirected (markers stripped, no escape codes). Rendering goes through a single
 `renderMarkdown` seam that falls back to a plain print if the widget throws, so
 an answer is never silently dropped.
 
+### Orchestration across multiple MCP servers (day 20)
+
+`:client` connects to **several MCP servers at once** and lets the agent pick the
+right tool from the right server, routing each call back to its owner and chaining a
+long flow across them. Nothing is model-specific — every tool is taken through the
+standard MCP protocol; DeepSeek is only the LLM harness on top.
+
+**How it works**
+
+- **`servers.json`** (in `client/`) lists the servers. Each entry is
+  `{ name, transport: "stdio"|"sse", command+args | url, env?, enabled? }`. Override
+  the file with the `MCP_SERVERS` env var (a path, or inline JSON). CLI args still work
+  as a back-compat shortcut for a single stdio server.
+- The client brings up **every** server (stdio → subprocess like before, Windows
+  `cmd /c` wrapper + inherited stderr; sse → over its `url`). A server that fails to
+  start is **logged to stderr and skipped** — it never takes the whole agent down.
+  On exit **all** clients are closed and all subprocesses killed.
+- A **`ToolRouter`** aggregates the tools of all servers into one list for the model.
+  Names are namespaced as **`<server>__<tool>`** so (a) names never collide across
+  servers (the API requires unique tool names) and (b) a call resolves unambiguously
+  to its owning client. `router.callTool("filesystem__write_file", …)` strips the
+  prefix and forwards `write_file` to the filesystem server; an unknown name returns a
+  readable error. Descriptions are tagged `[server]` so the model reasons about which
+  backend a tool belongs to.
+
+**Default `servers.json`** wires three different-in-nature servers:
+
+| name            | transport | command                                              | role                                |
+|-----------------|-----------|------------------------------------------------------|-------------------------------------|
+| `home-assistant`| stdio     | `java -jar ../server/build/libs/server-all.jar --stdio` | this project's HA server (sensors)  |
+| `time`          | stdio     | `npx -y time-mcp`                                     | current time / timezones            |
+| `filesystem`    | stdio     | `npx -y @modelcontextprotocol/server-filesystem ./mcp-data` | read/write reports under a sandbox  |
+
+A 4th (`@modelcontextprotocol/server-memory`) is present but `enabled: false`; flip it
+to orchestrate 4 MCPs. Saving a report now goes through the **external filesystem
+server**, not the HA server — so the flow genuinely crosses servers.
+
+**Run it**
+
+```bash
+cp client/.env.example client/.env        # set DEEPSEEK_API_KEY
+./gradlew :server:shadowJar               # build the HA server jar referenced in servers.json
+./gradlew :client:run                     # no --args: reads client/servers.json
+```
+
+`Node/npx` must be on PATH for the `time`/`filesystem` servers. The `home-assistant`
+entry reads `HA_BASE_URL`/`HA_TOKEN` from `server/.env` itself (no secrets in
+`servers.json`).
+
+**Long cross-server flow (day 20 demo)** — one natural request the model decomposes
+into calls on **different** servers:
+
+```text
+> Get the current time, collect the temperature and humidity sensor readings,
+  assess room comfort, and save a dated report to a file.
+
+# · time__current_time {}
+# · home-assistant__list_entities {"domain":"sensor"}
+# · home-assistant__get_sensor {"entity_id":"sensor.living_room_temperature"}
+# · home-assistant__get_sensor {"entity_id":"sensor.living_room_humidity"}
+# · filesystem__write_file {"path":"./mcp-data/report-2026-06-27.md","content":"# Comfort report …"}
+# "Saved the comfort report to ./mcp-data/report-2026-06-27.md — 22.4 °C / 47% RH, comfortable."
+```
+
+The `· <namespaced tool> <args>` lines on **stderr** prove the choice and order of
+calls span ≥2 (here 3) different servers.
+
+**Test:** `client/src/test/kotlin/ToolRouterTest.kt` covers namespacing, prefix
+stripping, name-collision resolution, separator-in-tool-name round-trip, and the
+unknown-tool error.
+
+### Demo video (day 20)
+
+- Show `client/servers.json` and start `./gradlew :client:run`: stderr prints
+  `Connected '<name>': N tool(s)` for **home-assistant**, **time** and **filesystem**,
+  then `Aggregated 27 tool(s) from 3 server(s)` — three independent MCP servers behind
+  one agent.
+- Type the single request above and watch the `·` lines on stderr fire in order across
+  servers: `time__current_time` → `home-assistant__list_entities`/`get_sensor` →
+  `filesystem__write_file` — the model alone picks tool and server.
+- Open the written file under `client/mcp-data/` to show the dated report was saved by
+  the **external** filesystem server, not the HA server — the flow truly crossed MCPs.
+
 ## Stack
 
 - Kotlin/JVM, Gradle (Kotlin DSL, multi-module), coroutines.
@@ -396,6 +517,7 @@ an answer is never silently dropped.
 - SQLite via `org.xerial:sqlite-jdbc` for the background collector's persistent store.
 - Coroutine scheduler (`SupervisorJob` scope) for the 24/7 background collection loop.
 - `dotenv-kotlin` for local `.env` secrets (process env takes precedence).
-- Transports: `StdioServerTransport` (default) and Ktor SSE (`mcp { … }` plugin).
+- Transports: server `StdioServerTransport` (default) + Ktor SSE (`mcp { … }` plugin);
+  client `StdioClientTransport` + `mcpSseTransport` (multi-server, via a `ToolRouter`).
 - DeepSeek API (`deepseek-v4-pro`, OpenAI-compatible function calling) via Ktor client for the agent loop.
 - Mordant (`mordant-markdown`) for terminal markdown rendering (ANSI on a TTY, plain text when piped).

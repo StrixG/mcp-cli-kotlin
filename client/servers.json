@@ -1,0 +1,58 @@
+{
+  // MCP servers the :client connects to at once. The agent sees every tool as
+  // "<name>__<tool>" and the ToolRouter sends each call back to its owner.
+  //
+  // transport "stdio": spawn `command` + `args` as a subprocess (Windows wraps it in
+  //   `cmd /c` automatically so npx/.cmd launchers resolve).
+  // transport "sse":   connect to `url` over HTTP (e.g. a remote/Docker server).
+  // env: extra environment variables for a stdio subprocess.
+  // enabled=false: keep the entry but skip connecting.
+  "servers": [
+    {
+      // This project's own MCP server (Home Assistant), reached as a REMOTE server over
+      // HTTP+SSE — the same way you'd hit one on a VPS. Run it in Docker first:
+      //   docker build -t ha-mcp .
+      //   docker run --rm -p 3001:3001 --env-file server/.env ha-mcp
+      // The container loads HA_BASE_URL/HA_TOKEN from its env and serves the MCP SSE
+      // stream at the ROOT path on port 3001 (the SDK's Application.mcp{} mounts the
+      // sse route at "/", not "/sse"), so no secrets are needed here. (For a local stdio
+      // launch instead, set transport "stdio", command "java", args
+      // ["-jar","../server/build/libs/server-all.jar","--stdio"].)
+      // If the server runs with OAuth enabled (cloud deploy), add an "auth" block.
+      // Secrets come from client/.env via ${VAR} interpolation, never inline here.
+      //   client_credentials (headless agent):
+      //     "auth": { "flow": "client_credentials",
+      //               "clientId": "${HA_MCP_CLIENT_ID}",
+      //               "clientSecret": "${HA_MCP_CLIENT_SECRET}" }
+      //   authorization_code (browser login; self-registers if no clientId):
+      //     "auth": { "flow": "authorization_code" }
+      "name": "home-assistant",
+      "transport": "sse",
+      "url": "http://localhost:3001"
+    },
+    {
+      // Reference time server (npm `time-mcp`): current time, timezones, conversions.
+      "name": "time",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "time-mcp"]
+    },
+    {
+      // Official filesystem server, sandboxed to ./mcp-data — this is where reports and
+      // notes are written, so the save step goes through a DIFFERENT server than HA.
+      "name": "filesystem",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "./mcp-data"]
+    },
+    {
+      // Optional 4th server (knowledge graph / memory) for deeper orchestration.
+      // Set "enabled": true to include it.
+      "name": "memory",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "enabled": false
+    }
+  ]
+}

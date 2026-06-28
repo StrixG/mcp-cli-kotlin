@@ -11,6 +11,10 @@ services:
       - server/.env
     environment:
       DB_PATH: /data/measurements.db
+      # Persist the OAuth signing key on the volume so tokens survive restarts.
+      JWT_KEY_PATH: /data/oauth-signing-key.json
+      # AUTH_ENABLED / PUBLIC_URL / OAUTH_CLIENT_* / OWNER_PASSWORD load from server/.env.
+      # PUBLIC_URL must be the public https:// URL (TLS terminated by a reverse proxy).
     ports:
       - "3001:3001"
     volumes:

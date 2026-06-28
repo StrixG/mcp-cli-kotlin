@@ -35,6 +35,12 @@ dependencies {
     // Ktor server engine for the optional HTTP/SSE transport (VPS deploy).
     implementation("io.ktor:ktor-server-cio:3.4.3")
 
+    // --- Day 20: OAuth 2.1 authorization (HTTP/SSE transport only) ------------
+    // Embedded authorization server: sign RS256 JWTs and publish a JWK Set.
+    implementation("com.nimbusds:nimbus-jose-jwt:10.9.1")
+    // JSON DTOs for the OAuth metadata / token endpoints + status pages.
+    implementation("io.ktor:ktor-server-content-negotiation:3.4.3")
+
     // SLF4J -> stderr, so stdout stays clean for the MCP protocol over stdio.
     implementation("org.slf4j:slf4j-simple:2.0.18")
 
@@ -42,6 +48,8 @@ dependencies {
     testImplementation(kotlin("test"))
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
     testImplementation("io.ktor:ktor-client-mock:3.4.3")
+    // In-process server harness for the OAuth endpoints + token-validation tests.
+    testImplementation("io.ktor:ktor-server-test-host:3.4.3")
 }
 
 tasks.test {

@@ -1,28 +1,31 @@
-import io.modelcontextprotocol.kotlin.sdk.client.Client
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
-import io.modelcontextprotocol.kotlin.sdk.types.Tool
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 
-private const val MAX_TOOL_ITERATIONS = 8
+private const val MAX_TOOL_ITERATIONS = 12
 
 private val SYSTEM_PROMPT = """
-    You are a smart-home assistant controlling Home Assistant through the provided tools.
-    Use the tools to inspect and change device state. Never invent entity ids — discover
-    them with list_entities first. To switch a light, call call_service with
-    domain="light" and service "turn_on", "turn_off", or "toggle" for the target
-    entity_id. After acting, confirm the outcome to the user in one short sentence.
+    You are an orchestration agent wired to SEVERAL independent MCP servers at once.
+    Every tool name is prefixed with its server as `<server>__<tool>` (e.g.
+    `home-assistant__list_entities`, `time__current_time`, `filesystem__write_file`).
+    Pick the right server for each step and chain tools across servers to satisfy the
+    request. Read each tool's description/schema; never invent a tool or its arguments.
 
-    Judging whether a change took effect: compare the entity's attributes (brightness,
-    color_temp, etc.) and `last_updated`, NOT `last_changed`. `last_changed` only moves
-    when the on/off state flips; adjusting brightness or color on an already-on light
-    leaves `last_changed` frozen while `last_updated` advances. A frozen `last_changed`
-    does not mean the device is unresponsive.
+    Home Assistant (`home-assistant__*`): inspect and change device state. Never invent
+    entity ids — discover them with `list_entities` first. To switch a light, call
+    `call_service` with domain="light" and service "turn_on", "turn_off", or "toggle".
+    When judging whether a change took effect, compare attributes (brightness, color_temp)
+    and `last_updated`, NOT `last_changed`: `last_changed` only moves when on/off flips,
+    so it can stay frozen while a brightness/color change still applied.
 
-    When the user asks to save or export a summary or report, first produce the summary
-    (e.g. with get_summary), then call save_report with that text as `content` to write it
-    to a file, and tell the user the saved path.
+    Time (`time__*`): use it for the current date/time/timezone — do not guess the clock.
+
+    Filesystem (`filesystem__*`): use it to read and write files in the allowed directory.
+    When the user asks to save or export a report, first gather/compose the content, then
+    write it with the filesystem server's write tool, and tell the user the saved path.
+
+    After completing the request, confirm the outcome to the user in a short answer.
 """.trimIndent()
 
 /** Human-readable local timestamp, e.g. "Saturday, 2026-06-27 14:05 MSK (UTC+03:00)". */
@@ -45,12 +48,13 @@ private fun CallToolResult.textContent(): String =
  * function calling, feed each tool result back, and print the model's final answer.
  * Diagnostics (which tool is being called) go to stderr; answers go to stdout.
  */
-suspend fun runAgentRepl(mcpClient: Client, tools: List<Tool>, deepseek: DeepSeekClient) {
-    val toolDefs = toDeepSeekTools(tools)
+suspend fun runAgentRepl(router: ToolRouter, deepseek: DeepSeekClient) {
+    val toolDefs = toDeepSeekTools(router.tools)
     val history = mutableListOf(ChatMessage(role = "system", content = systemPrompt()))
     val stdin = System.`in`.bufferedReader(Charsets.UTF_8)
 
-    println("\nAgent ready. Type a goal (e.g. \"turn on the kitchen light\"). 'exit' to quit.")
+    println("\nAgent ready (servers: ${router.serverNames.joinToString(", ")}). " +
+        "Type a goal. 'exit' to quit.")
     while (true) {
         print("\n> ")
         System.out.flush()
@@ -61,7 +65,7 @@ suspend fun runAgentRepl(mcpClient: Client, tools: List<Tool>, deepseek: DeepSee
         history[0] = ChatMessage(role = "system", content = systemPrompt())
         history += ChatMessage(role = "user", content = goal)
         try {
-            runTurn(mcpClient, toolDefs, deepseek, history)
+            runTurn(router, toolDefs, deepseek, history)
         } catch (e: Exception) {
             System.err.println("DeepSeek/agent error: ${e.message}")
         }
@@ -71,7 +75,7 @@ suspend fun runAgentRepl(mcpClient: Client, tools: List<Tool>, deepseek: DeepSee
 
 /** One user turn: loop tool-calls until the model returns a plain answer (bounded). */
 private suspend fun runTurn(
-    mcpClient: Client,
+    router: ToolRouter,
     toolDefs: List<ToolDef>,
     deepseek: DeepSeekClient,
     history: MutableList<ChatMessage>,
@@ -90,7 +94,7 @@ private suspend fun runTurn(
             val args = parseToolArgs(call.function.arguments)
             System.err.println("  · ${call.function.name} $args")
             val resultText = try {
-                mcpClient.callTool(name = call.function.name, arguments = args).textContent()
+                router.callTool(call.function.name, args).textContent()
             } catch (e: Exception) {
                 "ERROR calling ${call.function.name}: ${e.message}"
             }

@@ -46,3 +46,10 @@ local.properties
 
 # Generated reports (save_report tool, day 19)
 **/reports/
+
+# Filesystem MCP sandbox (day 20) — keep the dir, ignore anything written into it
+client/mcp-data/*
+!client/mcp-data/.gitkeep
+
+# Smoke-test scratch dir (day 20) — holds a generated RSA signing key, never commit
+server/smoke/

@@ -1,6 +1,12 @@
+import auth.AuthConfig
+import auth.OAuthServer
+import auth.SigningKeys
+import auth.installMcpAuth
+import auth.oauthRoutes
 import io.github.cdimascio.dotenv.dotenv
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.embeddedServer
+import io.ktor.server.routing.routing
 import io.modelcontextprotocol.kotlin.sdk.server.StdioServerTransport
 import io.modelcontextprotocol.kotlin.sdk.server.mcp
 import kotlinx.coroutines.Job
@@ -130,7 +136,19 @@ fun main(args: Array<String>) {
 
     when (command) {
         "--stdio" -> runStdio(client, storage, config, reportsDir)
-        "--sse", "--http" -> runSse(client, storage, config, reportsDir, port)
+        "--sse", "--http" -> {
+            // OAuth applies only to the network transport; build + validate it here so a
+            // plain stdio run never trips the PUBLIC_URL requirement.
+            val authConfig = AuthConfig.from { dotenv[it] }
+            val signingKeys = if (authConfig.enabled) {
+                val p = java.io.File(authConfig.keyPath)
+                val keyFile = if (p.isAbsolute) p else java.io.File(envDir ?: ".", authConfig.keyPath)
+                SigningKeys.loadOrCreate(keyFile.path)
+            } else {
+                null
+            }
+            runSse(client, storage, config, reportsDir, port, authConfig, signingKeys)
+        }
         else -> {
             log("Unknown command: $command. Use --stdio (default) or --sse [port].")
             exitProcess(1)
@@ -161,10 +179,35 @@ private fun runStdio(client: HomeAssistantClient, storage: Storage, config: Coll
     exitProcess(0)
 }
 
-/** HTTP + SSE transport via the SDK's Ktor plugin. Endpoint: http://host:port/sse */
-private fun runSse(client: HomeAssistantClient, storage: Storage, config: CollectionConfig, reportsDir: java.io.File, port: Int) {
-    log("Home Assistant MCP server starting on http://0.0.0.0:$port/sse")
+/**
+ * HTTP + SSE transport via the SDK's Ktor plugin. Endpoint: http://host:port/sse
+ *
+ * When [auth] is enabled the server becomes an OAuth 2.1 protected resource: the auth gate
+ * runs before the MCP routes (rejecting unauthenticated calls with 401), and the embedded
+ * authorization-server endpoints (/authorize, /token, /register, discovery metadata) are
+ * mounted alongside. With auth disabled it behaves exactly as before (local/dev use).
+ */
+private fun runSse(
+    client: HomeAssistantClient,
+    storage: Storage,
+    config: CollectionConfig,
+    reportsDir: java.io.File,
+    port: Int,
+    auth: AuthConfig,
+    keys: SigningKeys?,
+) {
+    if (auth.enabled && keys != null) {
+        log("Home Assistant MCP server starting on http://0.0.0.0:$port/sse (OAuth 2.1 protected; public URL ${auth.publicUrl})")
+    } else {
+        log("Home Assistant MCP server starting on http://0.0.0.0:$port/sse (AUTH DISABLED — do not expose publicly)")
+    }
     embeddedServer(CIO, host = "0.0.0.0", port = port) {
+        if (auth.enabled && keys != null) {
+            installMcpAuth(auth, keys)
+        }
         mcp { configureServer(client, storage, config, reportsDir) }
+        if (auth.enabled && keys != null) {
+            routing { oauthRoutes(OAuthServer(auth, keys)) }
+        }
     }.start(wait = true)
 }

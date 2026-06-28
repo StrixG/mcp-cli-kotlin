@@ -37,6 +37,8 @@ dependencies {
     // Unit tests: kotlin-test on the JUnit5 platform, coroutine test scope.
     testImplementation(kotlin("test"))
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
+    // MockEngine to stub the authorization-server HTTP for OAuth discovery/grant tests.
+    testImplementation("io.ktor:ktor-client-mock:3.4.3")
 }
 
 tasks.test {
