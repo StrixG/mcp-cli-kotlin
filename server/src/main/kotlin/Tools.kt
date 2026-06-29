@@ -81,7 +81,8 @@ fun configureServer(
     server.addTool(
         name = "list_entities",
         description = "List Home Assistant entities with their entity_id, friendly name and current " +
-            "state. Optionally filter by domain (light, switch, sensor, climate, …).",
+            "state. Always call this first to discover available entity ids — never guess an entity id. " +
+            "Optionally filter by domain (light, switch, sensor, climate, …).",
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 put("domain", prop("string", "Optional domain filter, e.g. 'light', 'switch', 'sensor', 'climate'."))
@@ -110,7 +111,10 @@ fun configureServer(
     // 2) get_state ----------------------------------------------------------
     server.addTool(
         name = "get_state",
-        description = "Get the current state and key attributes of one Home Assistant entity.",
+        description = "Get the current state and key attributes of one Home Assistant entity. " +
+            "Note: last_changed only moves when the on/off state flips; last_updated moves on every " +
+            "change including attributes (brightness, color_temp). Use last_updated to verify that a " +
+            "setting change took effect, not last_changed.",
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 put("entity_id", prop("string", "Full entity id, e.g. 'light.kitchen' or 'sensor.outdoor_temp'."))
@@ -144,7 +148,9 @@ fun configureServer(
     server.addTool(
         name = "call_service",
         description = "Call a Home Assistant service on an entity, e.g. light/turn_on, light/turn_off, " +
-            "switch/toggle, climate/set_temperature. Returns the resulting state when HA reports it.",
+            "switch/toggle, climate/set_temperature. Returns the resulting state when HA reports it. " +
+            "To verify the change took effect, compare last_updated (not last_changed — last_changed " +
+            "only moves on on/off state flips, not on attribute changes like brightness or color_temp).",
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 put("domain", prop("string", "Service domain, e.g. 'light', 'switch', 'climate'."))

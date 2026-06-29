@@ -15,7 +15,7 @@ RUN chmod +x gradlew && ./gradlew --no-daemon :server:dependencies > /dev/null 2
 
 # Now the sources, then build the self-contained jar.
 COPY . .
-RUN ./gradlew --no-daemon :server:shadowJar
+RUN chmod +x gradlew && ./gradlew --no-daemon :server:shadowJar
 
 # --- Runtime stage: JRE only ---------------------------------------------------
 FROM eclipse-temurin:17-jre AS runtime

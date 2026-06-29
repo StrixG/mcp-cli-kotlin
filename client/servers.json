@@ -38,12 +38,12 @@
       "args": ["-y", "time-mcp"]
     },
     {
-      // Official filesystem server, sandboxed to ./mcp-data — this is where reports and
-      // notes are written, so the save step goes through a DIFFERENT server than HA.
-      "name": "filesystem",
+      // Fetch server — lets the agent retrieve external URLs (weather APIs, etc.) so it
+      // can enrich HA sensor data with real-world context without storing credentials here.
+      "name": "fetch",
       "transport": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "./mcp-data"]
+      "command": "pipx",
+      "args": ["run", "mcp-server-fetch"]
     },
     {
       // Optional 4th server (knowledge graph / memory) for deeper orchestration.
